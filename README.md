@@ -74,12 +74,12 @@ dotnet run
 
 ## 📚 Documentation
 
-- **[Implementation Guide](IMPLEMENTATION_GUIDE.md)** - Complete setup instructions
-- **[Zero-Hopping Explained](ZERO_HOPPING_EXPLAINED.md)** - How hop count modification works
-- **[Protobuf Setup Guide](PROTOBUF_SETUP_GUIDE.md)** - Adding Meshtastic protobuf support
-- **[Bitfield Stripping Guide](BITFIELD_STRIPPING_GUIDE.md)** - Removing "OK to MQTT" flags
-- **[Location Blocking Guide](LOCATION_BLOCKING_GUIDE.md)** - Privacy controls for GPS data
-- **[Security Flow Diagrams](SECURITY_FLOW_DIAGRAMS.md)** - Visual guide to security features
+- **[Implementation Guide](docs/IMPLEMENTATION_GUIDE.md)** - Complete setup instructions
+- **[Zero-Hopping Explained](docs/ZERO_HOPPING_EXPLAINED.md)** - How hop count modification works
+- **[Protobuf Setup Guide](docs/PROTOBUF_SETUP_GUIDE.md)** - Adding Meshtastic protobuf support
+- **[Bitfield Stripping Guide](docs/BITFIELD_STRIPPING_GUIDE.md)** - Removing "OK to MQTT" flags
+- **[Location Blocking Guide](docs/LOCATION_BLOCKING_GUIDE.md)** - Privacy controls for GPS data
+- **[Security Flow Diagrams](docs/SECURITY_FLOW_DIAGRAMS.md)** - Visual guide to security features
 
 ## 🎯 Common Use Cases
 
@@ -117,7 +117,7 @@ dotnet run
 - ✅ Topic filtering
 - ✅ Connection ACLs
 
-**Requires protobuf setup** ([guide](PROTOBUF_SETUP_GUIDE.md)):
+**Requires protobuf setup** ([guide](docs/PROTOBUF_SETUP_GUIDE.md)):
 - ⏳ Zero-hopping
 - ⏳ Location stripping
 - ⏳ Bitfield stripping
