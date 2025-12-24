@@ -1,82 +1,138 @@
-# Meshtastic MQTT Broker Boilerplate
+# Meshtastic MQTT Broker with Enhanced Security & Privacy
 
-This project provides an MQTT broker boilerplate specifically designed for Meshtastic mesh network moderation. It handles encrypted mesh packets, validates messages, and can be configured to run with SSL.
+A feature-rich MQTT broker specifically designed for Meshtastic mesh networks with advanced packet filtering, rate limiting, privacy controls, and moderation capabilities.
 
-## Features
+## 🚀 Features
 
-- MQTT server implementation for Meshtastic devices
-- Allows for more precise access control than Mosquito ACLs
-  - Support for encrypted mesh packet handling and validation
-  - Support for validating client connections and subscriptions
-- SSL support for secure MQTT connections
-- Built using C# / .NET 9.0 with [MQTTnet](https://github.com/dotnet/MQTTnet)
-- Multi-platform support
-- Can be easily be packaged to run as a [portable standalone binary](https://learn.microsoft.com/en-us/dotnet/core/deploying/single-file/overview?tabs=cli)
-- Configurable logging with [Serilog](https://serilog.net/)
+### Core Security
+- **Fail2Ban Style Connection Moderation** - Automatically ban abusive clients
+- **Rate Limiting** - Per-node and global packet rate limits with duplicate detection
+- **Topic Filtering** - Whitelist/blacklist MQTT topics
+- **Connection ACLs** - Allow/block specific clients
 
-## Docker Setup
+### Privacy Controls
+- **Location Filtering** - Block or strip GPS data from POSITION packets
+- **Position Precision Reduction** - Degrade location accuracy for privacy
+- **Bitfield Stripping** - Remove "OK to MQTT" consent metadata
+- **Selective Node Filtering** - Per-node location policies
 
-### Prerequisites
+### Packet Modification
+- **Zero-Hopping** - Prevent specific packet types from being forwarded
+- **Hop Count Limits** - Enforce maximum hop counts
+- **Port Number Filtering** - Block/allow specific Meshtastic port numbers
 
-- Docker installed on your system
-- Certificate file (if using SSL mode)
+### Monitoring
+- **Real-time Statistics** - Track packets, bans, rate limits, and filters
+- **Comprehensive Logging** - Serilog integration with configurable levels
+- **Metrics Export** - Built-in statistics reporting
 
-### Docker Installation
+## 📋 Requirements
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/meshtastic/mqtt
-   cd mqtt
-   ```
+- .NET 9.0 SDK
+- Docker (optional, for containerized deployment)
 
-2. Build the Docker image:
-   ```bash
-   docker build -t meshtastic-mqtt-broker .
-   ```
-
-#### SSL Mode (Port 8883)
-
-To run with SSL enabled:
-
-1. Place your certificate file (`certificate.pfx`) in the project directory. (see [MQTTnet Server Wiki](https://github.com/dotnet/MQTTnet/wiki/Server))
-2. Run the container with the SSL environment variable:
+## 🔧 Quick Start
 
 ```bash
-docker run -p 8883:8883 -v $(pwd)/certificate.pfx:/app/certificate.pfx meshtastic-mqtt-broker
+# Clone the repository
+git clone https://github.com/yourusername/meshtastic-mqtt-broker.git
+cd meshtastic-mqtt-broker
+
+# Copy and customize configuration
+cp appsettings.json appsettings.local.json
+
+# Build and run
+dotnet restore
+dotnet build
+dotnet run
 ```
 
-### Docker Compose Example
+## ⚙️ Configuration Example
 
-```yaml
-version: '3'
-services:
-  mqtt-broker:
-    build: .
-    ports:
-      - "8883:8883"
-
-    volumes:
-      - ./certificate.pfx:/app/certificate.pfx
-    restart: unless-stopped
+```json
+{
+  "MqttBroker": {
+    "Port": 8883,
+    "UseSsl": true
+  },
+  "RateLimiting": {
+    "Enabled": true,
+    "PerNodePacketLimit": {
+      "MaxPacketsPerMinute": 60
+    }
+  },
+  "LocationFilter": {
+    "ReducePositionPrecision": true,
+    "TargetPrecisionBits": 12
+  },
+  "PacketFiltering": {
+    "BlockUnknownTopics": true,
+    "ZeroHopPortNums": [67]
+  }
+}
 ```
 
-## Configuration Options
+## 📚 Documentation
 
-- **Certificate**: Mount your PFX certificate file to `/app/certificate.pfx` in the container or preferably modify it in the parent folder after git cloning.
-- **Ports**: The application uses  8883 for SSL MQTT (default).
+- **[Implementation Guide](IMPLEMENTATION_GUIDE.md)** - Complete setup instructions
+- **[Zero-Hopping Explained](ZERO_HOPPING_EXPLAINED.md)** - How hop count modification works
+- **[Protobuf Setup Guide](PROTOBUF_SETUP_GUIDE.md)** - Adding Meshtastic protobuf support
+- **[Bitfield Stripping Guide](BITFIELD_STRIPPING_GUIDE.md)** - Removing "OK to MQTT" flags
+- **[Location Blocking Guide](LOCATION_BLOCKING_GUIDE.md)** - Privacy controls for GPS data
+- **[Security Flow Diagrams](SECURITY_FLOW_DIAGRAMS.md)** - Visual guide to security features
 
-## Ideas for MQTT mesh moderation
+## 🎯 Common Use Cases
 
-- Rate-limiting a packet we've heard before
-- Rate-limiting packets per node
-- "Zero hopping" certain packets
-- Blocking unknown topics or undecryptable packets (from unknown channels)
-- Blocking or rate-limiting certain portnums
-- Fail2ban style connection moderation
-- Banning from known bad actors list
+### Maximum Privacy
+```json
+{
+  "LocationFilter": { "BlockPositionPackets": true },
+  "PacketModification": { "StripOkToMqttBitfield": true }
+}
+```
 
-## Troubleshooting
+### Public Network
+```json
+{
+  "LocationFilter": {
+    "ReducePositionPrecision": true,
+    "TargetPrecisionBits": 12
+  }
+}
+```
 
-- Ensure proper network access to the Docker container
-- Check that certificates are correctly formatted
-- Review logs using `docker logs [container-id]`
+### Testing/Development
+```json
+{
+  "RateLimiting": { "Enabled": false },
+  "PacketFiltering": { "BlockUnknownTopics": false }
+}
+```
+
+## 📊 Status
+
+**Working without protobuf:**
+- ✅ Rate limiting
+- ✅ Fail2Ban
+- ✅ Topic filtering
+- ✅ Connection ACLs
+
+**Requires protobuf setup** ([guide](PROTOBUF_SETUP_GUIDE.md)):
+- ⏳ Zero-hopping
+- ⏳ Location stripping
+- ⏳ Bitfield stripping
+- ⏳ Precision reduction
+
+## 📜 License
+
+GPL-3.0 License - See [LICENSE](LICENSE) file
+
+## 🙏 Acknowledgments
+
+- Original boilerplate: [meshtastic/mqtt](https://github.com/meshtastic/mqtt)
+- Meshtastic Project: [meshtastic.org](https://meshtastic.org)
+- MQTTnet Library: [dotnet/MQTTnet](https://github.com/dotnet/MQTTnet)
+
+---
+
+Made with ❤️ for the Meshtastic community

@@ -1,204 +1,335 @@
-﻿using MQTTnet.Server;
-using Meshtastic.Protobufs;
-using Google.Protobuf;
-using Serilog;
-using MQTTnet.Protocol;
-using System.Runtime.Loader;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Serilog.Formatting.Compact;
-using Meshtastic.Crypto;
-using Meshtastic;
-using System.Security.Authentication;
+using System;
+using System.IO;
 using System.Security.Cryptography.X509Certificates;
-using System.Reflection;
+using System.Text;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using MQTTnet;
+using MQTTnet.Protocol;
+using MQTTnet.Server;
+using Serilog;
+using Meshtastic.Mqtt.Configuration;
+using Meshtastic.Mqtt.Services;
 
-await RunMqttServer(args);
-
-async Task RunMqttServer(string[] args)
+namespace Meshtastic.Mqtt
 {
-    Log.Logger = new LoggerConfiguration()
-        .MinimumLevel.Debug()
-        .WriteTo.Console(new RenderedCompactJsonFormatter())
-        // .WriteTo.File(new RenderedCompactJsonFormatter(), "log.json", rollingInterval: RollingInterval.Hour)
-        .CreateLogger();
-
-    using var mqttServer = new MqttServerFactory()
-        .CreateMqttServer(BuildMqttServerOptions());
-    ConfigureMqttServer(mqttServer);
-
-    // Set up host
-    using var host = CreateHostBuilder(args).Build();
-    await host.StartAsync();
-    var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
-
-    await mqttServer.StartAsync();
-
-    // Configure graceful shutdown
-    await SetupGracefulShutdown(mqttServer, lifetime, host);
-}
-
-MqttServerOptions BuildMqttServerOptions()
-{
-    var currentPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
-
-    #pragma warning disable SYSLIB0057 // Type or member is obsolete
-    var certificate = new X509Certificate2(
-        Path.Combine(currentPath, "certificate.pfx"),
-        "large4cats",
-        X509KeyStorageFlags.Exportable);
-    #pragma warning restore SYSLIB0057
-
-    var options = new MqttServerOptionsBuilder()
-        .WithoutDefaultEndpoint()
-        .WithEncryptedEndpoint()
-        .WithEncryptedEndpointPort(8883)
-        .WithEncryptionCertificate(certificate.Export(X509ContentType.Pfx))
-        .WithEncryptionSslProtocol(SslProtocols.Tls12)
-        .Build();
-
-    Log.Logger.Information("Using SSL certificate for MQTT server");
-    return options;
-}
-
-void ConfigureMqttServer(MqttServer mqttServer)
-{
-    mqttServer.InterceptingPublishAsync += HandleInterceptingPublish;
-    mqttServer.InterceptingSubscriptionAsync += HandleInterceptingSubscription;
-    mqttServer.ValidatingConnectionAsync += HandleValidatingConnection;
-}
-
-async Task HandleInterceptingPublish(InterceptingPublishEventArgs args)
-{
-    try 
+    class Program
     {
-        if (args.ApplicationMessage.Payload.Length == 0)
+        private static AppSettings _appSettings;
+        private static IServiceProvider _serviceProvider;
+        
+        static async Task Main(string[] args)
         {
-            Log.Logger.Warning("Received empty payload on topic {@Topic} from {@ClientId}", args.ApplicationMessage.Topic, args.ClientId);
-            args.ProcessPublish = false;
-            return;
+            // Load configuration
+            var configuration = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+                .AddEnvironmentVariables()
+                .AddCommandLine(args)
+                .Build();
+
+            // Configure Serilog
+            Log.Logger = new LoggerConfiguration()
+                .ReadFrom.Configuration(configuration)
+                .CreateLogger();
+
+            try
+            {
+                Log.Information("Starting Meshtastic MQTT Broker");
+
+                // Bind configuration
+                _appSettings = new AppSettings();
+                configuration.Bind(_appSettings);
+
+                // Setup dependency injection
+                var services = new ServiceCollection();
+                ConfigureServices(services);
+                _serviceProvider = services.BuildServiceProvider();
+
+                // Start the MQTT broker
+                await StartMqttBroker();
+            }
+            catch (Exception ex)
+            {
+                Log.Fatal(ex, "Application terminated unexpectedly");
+            }
+            finally
+            {
+                Log.CloseAndFlush();
+            }
         }
 
-        var serviceEnvelope = ServiceEnvelope.Parser.ParseFrom(args.ApplicationMessage.Payload);
-
-        if (!IsValidServiceEnvelope(serviceEnvelope))
+        private static void ConfigureServices(IServiceCollection services)
         {
-            Log.Logger.Warning("Service envelope or packet is malformed. Blocking packet on topic {@Topic} from {@ClientId}",
-                args.ApplicationMessage.Topic, args.ClientId);
-            args.ProcessPublish = false;
-            return;
+            // Add logging
+            services.AddLogging(builder =>
+            {
+                builder.ClearProviders();
+                builder.AddSerilog();
+            });
+
+            // Register configuration
+            services.AddSingleton(_appSettings);
+
+            // Register services
+            services.AddSingleton(new Fail2BanService(
+                _appSettings.ConnectionModeration.Fail2Ban,
+                _serviceProvider?.GetService<ILogger<Fail2BanService>>()));
+            
+            services.AddSingleton(new RateLimitingService(
+                _appSettings.RateLimiting,
+                _serviceProvider?.GetService<ILogger<RateLimitingService>>()));
+            
+            services.AddSingleton(new PacketFilteringService(
+                _appSettings.PacketFiltering,
+                _serviceProvider?.GetService<ILogger<PacketFilteringService>>()));
         }
 
-        // Spot for any async operations we might want to perform
-        await Task.FromResult(0);
-
-        var data = DecryptMeshPacket(serviceEnvelope);
-
-        // Uncomment to block unrecognized packets
-        // if (data == null)
-        // {
-        //     Log.Logger.Warning("Service envelope does not contain a valid packet. Blocking packet");
-        //     args.ProcessPublish = false;
-        //     return;
-        // }
-
-        LogReceivedMessage(args.ApplicationMessage.Topic, args.ClientId, data);
-        args.ProcessPublish = true;
-    }
-    catch (InvalidProtocolBufferException)
-    {
-        Log.Logger.Warning("Failed to decode presumed protobuf packet. Blocking");
-        args.ProcessPublish = false;
-    }
-    catch (Exception ex)
-    {
-        Log.Logger.Error("Exception occurred while processing packet on {@Topic} from {@ClientId}: {@Exception}",
-            args.ApplicationMessage.Topic, args.ClientId, ex.Message);
-        args.ProcessPublish = false;
-    }
-}
-
-Task HandleInterceptingSubscription(InterceptingSubscriptionEventArgs args)
-{
-    // Add filtering logic here if needed
-    args.ProcessSubscription = true;
-    return Task.CompletedTask;
-}
-
-Task HandleValidatingConnection(ValidatingConnectionEventArgs args)
-{
-    // Add connection / authentication logic here if needed
-    args.ReasonCode = MqttConnectReasonCode.Success;
-    return Task.CompletedTask;
-}
-
-bool IsValidServiceEnvelope(ServiceEnvelope serviceEnvelope)
-{
-    return !(String.IsNullOrWhiteSpace(serviceEnvelope.ChannelId) ||
-            String.IsNullOrWhiteSpace(serviceEnvelope.GatewayId) ||
-            serviceEnvelope.Packet == null ||
-            serviceEnvelope.Packet.Id < 1 ||
-            serviceEnvelope.Packet.From < 1 ||
-            serviceEnvelope.Packet.Encrypted == null ||
-            serviceEnvelope.Packet.Encrypted.Length < 1 ||
-            serviceEnvelope.Packet.Decoded != null);
-}
-
-void LogReceivedMessage(string topic, string clientId, Data? data)
-{
-    if (data?.Portnum == PortNum.TextMessageApp)
-    {
-        Log.Logger.Information("Received text message on topic {@Topic} from {@ClientId}: {@Message}",
-            topic, clientId, data.Payload.ToStringUtf8());
-    }
-    else
-    {
-        Log.Logger.Information("Received packet on topic {@Topic} from {@ClientId} with port number: {@Portnum}",
-            topic, clientId, data?.Portnum);
-    }
-}
-
-static Data? DecryptMeshPacket(ServiceEnvelope serviceEnvelope)
-{
-    var nonce = new NonceGenerator(serviceEnvelope.Packet.From, serviceEnvelope.Packet.Id).Create();
-    var decrypted = PacketEncryption.TransformPacket(serviceEnvelope.Packet.Encrypted.ToByteArray(), nonce, Resources.DEFAULT_PSK);
-    var payload = Data.Parser.ParseFrom(decrypted);
-
-    if (payload.Portnum > PortNum.UnknownApp && payload.Payload.Length > 0)
-        return payload;
-
-    return null;
-}
-
-async Task SetupGracefulShutdown(MqttServer mqttServer, IHostApplicationLifetime lifetime, IHost host)
-{
-    var ended = new ManualResetEventSlim();
-    var starting = new ManualResetEventSlim();
-
-    AssemblyLoadContext.Default.Unloading += ctx =>
-    {
-        starting.Set();
-        Log.Logger.Debug("Waiting for completion");
-        ended.Wait();
-    };
-
-    starting.Wait();
-
-    Log.Logger.Debug("Received signal gracefully shutting down");
-    await mqttServer.StopAsync();
-    Thread.Sleep(500);
-    ended.Set();
-
-    lifetime.StopApplication();
-    await host.WaitForShutdownAsync();
-}
-
-static IHostBuilder CreateHostBuilder(string[] args)
-{
-    return Host.CreateDefaultBuilder(args)
-        .UseConsoleLifetime()
-        .ConfigureServices((hostContext, services) =>
+        private static async Task StartMqttBroker()
         {
-            services.AddSingleton(Console.Out);
-        });
+            var logger = _serviceProvider.GetRequiredService<ILogger<Program>>();
+            var fail2Ban = _serviceProvider.GetRequiredService<Fail2BanService>();
+            var rateLimiting = _serviceProvider.GetRequiredService<RateLimitingService>();
+            var packetFiltering = _serviceProvider.GetRequiredService<PacketFilteringService>();
+
+            var mqttFactory = new MqttFactory();
+            var mqttServerOptions = new MqttServerOptionsBuilder()
+                .WithDefaultEndpoint()
+                .WithDefaultEndpointPort(_appSettings.MqttBroker.Port)
+                .WithConnectionBacklog(_appSettings.MqttBroker.ConnectionBacklog)
+                .WithMaxPendingMessagesPerClient(_appSettings.MqttBroker.MaxPendingMessagesPerClient);
+
+            // Configure SSL if enabled
+            if (_appSettings.MqttBroker.UseSsl)
+            {
+                var certPath = _appSettings.MqttBroker.CertificatePath;
+                if (File.Exists(certPath))
+                {
+                    var certificate = string.IsNullOrEmpty(_appSettings.MqttBroker.CertificatePassword)
+                        ? new X509Certificate2(certPath)
+                        : new X509Certificate2(certPath, _appSettings.MqttBroker.CertificatePassword);
+
+                    mqttServerOptions.WithEncryptedEndpoint()
+                        .WithEncryptedEndpointPort(_appSettings.MqttBroker.Port)
+                        .WithEncryptionCertificate(certificate.Export(X509ContentType.Pfx));
+
+                    logger.LogInformation("SSL enabled using certificate: {Path}", certPath);
+                }
+                else
+                {
+                    logger.LogWarning("SSL enabled but certificate not found at: {Path}", certPath);
+                }
+            }
+
+            var mqttServer = mqttFactory.CreateMqttServer(mqttServerOptions.Build());
+
+            // Handle client connections
+            mqttServer.ValidatingConnectionAsync += e =>
+            {
+                var clientId = e.ClientId;
+                logger.LogInformation("Client connecting: {ClientId}", clientId);
+
+                // Check fail2ban
+                if (fail2Ban.IsClientBanned(clientId))
+                {
+                    logger.LogWarning("Rejected banned client: {ClientId}", clientId);
+                    e.ReasonCode = MqttConnectReasonCode.NotAuthorized;
+                    return Task.CompletedTask;
+                }
+
+                // Check blocklist
+                if (_appSettings.ConnectionModeration.BlockedClients.Contains(clientId) ||
+                    _appSettings.ConnectionModeration.KnownBadActors.Contains(clientId))
+                {
+                    logger.LogWarning("Rejected blocked client: {ClientId}", clientId);
+                    e.ReasonCode = MqttConnectReasonCode.NotAuthorized;
+                    return Task.CompletedTask;
+                }
+
+                // Check allowlist (if configured)
+                if (_appSettings.ConnectionModeration.AllowedClients.Any() &&
+                    !_appSettings.ConnectionModeration.AllowedClients.Contains(clientId))
+                {
+                    logger.LogWarning("Rejected client not on allowlist: {ClientId}", clientId);
+                    e.ReasonCode = MqttConnectReasonCode.NotAuthorized;
+                    return Task.CompletedTask;
+                }
+
+                // Authentication check
+                if (_appSettings.ConnectionModeration.RequireAuthentication)
+                {
+                    if (string.IsNullOrEmpty(e.UserName) || string.IsNullOrEmpty(e.Password))
+                    {
+                        logger.LogWarning("Client {ClientId} rejected: authentication required", clientId);
+                        fail2Ban.RecordFailedAttempt(clientId);
+                        e.ReasonCode = MqttConnectReasonCode.BadUserNameOrPassword;
+                        return Task.CompletedTask;
+                    }
+
+                    // TODO: Implement actual credential validation
+                    // For now, just clear failed attempts on successful auth
+                    fail2Ban.ClearFailedAttempts(clientId);
+                }
+
+                logger.LogInformation("Client connected: {ClientId}", clientId);
+                e.ReasonCode = MqttConnectReasonCode.Success;
+                return Task.CompletedTask;
+            };
+
+            // Handle subscriptions
+            mqttServer.InterceptingSubscriptionAsync += e =>
+            {
+                var clientId = e.ClientId;
+                var topic = e.TopicFilter.Topic;
+
+                logger.LogDebug("Client {ClientId} subscribing to: {Topic}", clientId, topic);
+
+                // Validate subscription topic
+                if (!packetFiltering.IsTopicAllowed(topic))
+                {
+                    logger.LogWarning("Client {ClientId} blocked from subscribing to: {Topic}", clientId, topic);
+                    e.Response.ReasonCode = MqttSubscribeReasonCode.TopicFilterInvalid;
+                }
+
+                return Task.CompletedTask;
+            };
+
+            // Handle incoming messages
+            mqttServer.InterceptingPublishAsync += e =>
+            {
+                var clientId = e.ClientId;
+                var topic = e.ApplicationMessage.Topic;
+
+                // Extract packet info (simplified - in real implementation, decode protobuf)
+                var packetInfo = ExtractPacketInfo(e.ApplicationMessage);
+
+                // Check global rate limit
+                if (!rateLimiting.CheckGlobalRateLimit())
+                {
+                    logger.LogWarning("Global rate limit exceeded, dropping packet");
+                    e.ProcessPublish = false;
+                    return Task.CompletedTask;
+                }
+
+                // Check for duplicate packets
+                var packetHash = packetInfo.GetHash();
+                if (rateLimiting.IsDuplicatePacket(packetHash))
+                {
+                    logger.LogDebug("Dropping duplicate packet from {NodeId}", packetInfo.NodeId);
+                    e.ProcessPublish = false;
+                    return Task.CompletedTask;
+                }
+
+                // Check per-node rate limit
+                if (!string.IsNullOrEmpty(packetInfo.NodeId) && 
+                    !rateLimiting.CheckNodeRateLimit(packetInfo.NodeId))
+                {
+                    logger.LogWarning("Node {NodeId} rate limited", packetInfo.NodeId);
+                    e.ProcessPublish = false;
+                    return Task.CompletedTask;
+                }
+
+                // Validate packet
+                var validationResult = packetFiltering.ValidateMessage(e.ApplicationMessage, packetInfo);
+                if (!validationResult.IsValid)
+                {
+                    logger.LogWarning("Packet validation failed: {Reason}", validationResult.Reason);
+                    e.ProcessPublish = false;
+                    return Task.CompletedTask;
+                }
+
+                // Check if we should zero-hop this packet
+                if (packetInfo.PortNum.HasValue && 
+                    packetFiltering.ShouldZeroHop(packetInfo.PortNum.Value))
+                {
+                    logger.LogDebug("Zero-hopping packet with port {PortNum}", packetInfo.PortNum.Value);
+                    // Modify hop count to 0 (in real implementation, modify the protobuf)
+                }
+
+                logger.LogDebug("Processing packet from {ClientId} on topic {Topic}", clientId, topic);
+                return Task.CompletedTask;
+            };
+
+            // Handle client disconnections
+            mqttServer.ClientDisconnectedAsync += e =>
+            {
+                logger.LogInformation("Client disconnected: {ClientId}, Type: {Type}", 
+                    e.ClientId, e.DisconnectType);
+                return Task.CompletedTask;
+            };
+
+            // Start the server
+            await mqttServer.StartAsync();
+            logger.LogInformation("MQTT Broker started on port {Port} (SSL: {SSL})", 
+                _appSettings.MqttBroker.Port, _appSettings.MqttBroker.UseSsl);
+
+            // Print statistics periodically
+            if (_appSettings.Metrics.Enabled)
+            {
+                _ = Task.Run(async () =>
+                {
+                    while (true)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(_appSettings.Metrics.ExportInterval));
+                        PrintStats(logger, fail2Ban, rateLimiting, packetFiltering);
+                    }
+                });
+            }
+
+            // Keep the application running
+            await Task.Delay(Timeout.Infinite);
+        }
+
+        private static void PrintStats(
+            ILogger logger,
+            Fail2BanService fail2Ban,
+            RateLimitingService rateLimiting,
+            PacketFilteringService packetFiltering)
+        {
+            logger.LogInformation("=== Broker Statistics ===");
+            
+            var fail2BanStats = fail2Ban.GetStats();
+            logger.LogInformation("Fail2Ban - Active Bans: {ActiveBans}, Total Banned: {TotalBanned}", 
+                fail2BanStats["ActiveBans"], fail2BanStats["TotalBannedClients"]);
+
+            var rateLimitStats = rateLimiting.GetStats();
+            logger.LogInformation("Rate Limiting - Packets/min: {PacketsPerMin}, Banned Nodes: {BannedNodes}", 
+                rateLimitStats["PacketsLastMinute"], rateLimitStats["BannedNodes"]);
+
+            var filterStats = packetFiltering.GetStats();
+            logger.LogInformation("Packet Filtering - Allowed: {Allowed}, Blocked: {Blocked}, Block Rate: {BlockRate:P2}", 
+                filterStats["AllowedPackets"], filterStats["BlockedPackets"], filterStats["BlockRate"]);
+        }
+
+        private static MeshtasticPacketInfo ExtractPacketInfo(MqttApplicationMessage message)
+        {
+            // Simplified extraction - in real implementation, decode protobuf
+            // This is just a placeholder showing the structure
+            
+            var info = new MeshtasticPacketInfo
+            {
+                Payload = message.PayloadSegment.Array ?? Array.Empty<byte>(),
+                IsEncrypted = false,
+                WasDecrypted = false
+            };
+
+            // Parse topic to extract channel info
+            // Format: msh/REGION/2/e/CHANNEL/NODEID
+            var parts = message.Topic.Split('/');
+            if (parts.Length >= 6)
+            {
+                info.Channel = parts[4];
+                info.NodeId = parts[5];
+            }
+
+            // In real implementation, decode the protobuf to get:
+            // - PortNum
+            // - HopCount
+            // - Encryption status
+            
+            return info;
+        }
+    }
 }

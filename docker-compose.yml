@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  mqtt-broker:
+    build: .
+    container_name: meshtastic-mqtt-broker
+    restart: unless-stopped
+    ports:
+      - "1883:1883"  # MQTT without SSL
+      - "8883:8883"  # MQTT with SSL
+    volumes:
+      # Mount configuration
+      - ./appsettings.json:/app/appsettings.json:ro
+      
+      # Mount SSL certificate (if using SSL)
+      - ./certificate.pfx:/app/certificate.pfx:ro
+      
+      # Mount logs directory
+      - ./logs:/app/logs
+    environment:
+      # Override configuration via environment variables
+      - MqttBroker__Port=8883
+      - MqttBroker__UseSsl=true
+      
+      # Example: Enable rate limiting
+      - RateLimiting__Enabled=true
+      
+      # Example: Block position packets
+      - LocationFilter__BlockPositionPackets=false
+      
+      # Example: Reduce position precision
+      - LocationFilter__ReducePositionPrecision=true
+      - LocationFilter__TargetPrecisionBits=12
+    networks:
+      - meshtastic
+    healthcheck:
+      test: ["CMD", "timeout", "5", "bash", "-c", "cat < /dev/null > /dev/tcp/localhost/8883"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  meshtastic:
+    driver: bridge

@@ -1,23 +1,33 @@
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
 
-# Copy csproj and restore dependencies
-COPY Meshtastic.Mqtt.csproj ./
-RUN dotnet restore
+# Copy project file and restore dependencies
+COPY ["Meshtastic.Mqtt.csproj", "./"]
+RUN dotnet restore "Meshtastic.Mqtt.csproj"
 
-# Copy the rest of the code
-COPY . ./
-RUN dotnet publish -c Release -o /app
+# Copy source code
+COPY . .
 
-# Build runtime image
-FROM mcr.microsoft.com/dotnet/runtime:9.0
+# Build
+RUN dotnet build "Meshtastic.Mqtt.csproj" -c Release -o /app/build
+
+# Publish
+FROM build AS publish
+RUN dotnet publish "Meshtastic.Mqtt.csproj" -c Release -o /app/publish /p:UseAppHost=false
+
+# Runtime image
+FROM mcr.microsoft.com/dotnet/aspnet:9.0
 WORKDIR /app
-COPY --from=build /app ./
 
-# Expose ports
-EXPOSE 1883 8883
+# Copy published application
+COPY --from=publish /app/publish .
 
-# Set environment variable to control SSL mode
-# ENV SSL=true  # Uncomment to enable SSL by default
+# Copy configuration (will be overridden by volume mount)
+COPY appsettings.json .
 
+# Expose MQTT ports
+EXPOSE 1883
+EXPOSE 8883
+
+# Run the application
 ENTRYPOINT ["dotnet", "Meshtastic.Mqtt.dll"]
